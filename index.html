@@ -15,7 +15,11 @@
   button { cursor:pointer; }
   button:hover { border-color:var(--accent); }
   header { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:6px 10px; border-bottom:1px solid var(--line); }
-  header .hint { margin-left:auto; opacity:.55; }
+  header .hint { opacity:.55; }
+  #solo { margin-left:auto; display:flex; flex-wrap:wrap; gap:4px; }
+  #solo button { min-width:2.2em; font:700 13px Consolas,monospace; }
+  header button.on { color:#fff; background:var(--accent); border-color:var(--accent); }
+  #back:disabled { opacity:.4; cursor:default; border-color:var(--line); }
 
   /* レイアウト編集パネル */
   #panel { display:flex; flex-wrap:wrap; gap:28px; max-height:45vh; overflow:auto; padding:10px 12px;
@@ -40,6 +44,9 @@
   .off p { margin:0; text-shadow:0 1px 3px #000; }
   .off button { justify-self:center; font-size:15px; color:#fff; background:var(--accent); border:0; border-radius:6px; padding:10px 22px; }
   .off button:hover { filter:brightness(1.15); }
+  /* 1枚だけ大きく表示: 他は隠すだけ（DOMを動かすとiframeが再読込されるため） */
+  #wall.solo .tile:not(.max), #wall.solo .split { visibility:hidden; }
+  #wall .tile.max { grid-area:1 / 1 / -1 / -1 !important; z-index:2; }
   body.editing .tile::after { content:attr(data-id); position:absolute; inset:0; display:grid; place-items:center;
                               font:700 64px/1 Consolas,monospace; color:#fff; background:#000a; pointer-events:none; }
 
@@ -57,6 +64,8 @@
   <button id="edit" type="button">⚙ レイアウト編集</button>
   <button id="reset" type="button">サイズを均等に戻す</button>
   <span class="hint">境界線をドラッグでサイズ変更（ブラウザに保存されます）</span>
+  <nav id="solo" aria-label="1枚だけ大きく表示"></nav>
+  <button id="back" type="button" disabled>⊞ 全体に戻る</button>
 </header>
 <section id="panel" hidden>
   <div>
@@ -173,7 +182,7 @@ function parseYT(u) {
 function fillTile(id) {
   const cell = tileEls[id], t = tileCfg(id);
   cell.replaceChildren();
-  cell.className = "tile";
+  cell.classList.remove("tradingview-widget-container", "off");
   cell.style.backgroundImage = "";
   if (t.type === "chart") {
     cell.classList.add("tradingview-widget-container");
@@ -244,7 +253,7 @@ function render() {
   wall.replaceChildren();
   tileEls = {};
   for (const [id, b] of Object.entries(boxes)) {
-    const cell = el("div");
+    const cell = el("div", "tile");
     cell.dataset.id = id;
     cell.style.gridArea = `${b.r0 + 1} / ${b.c0 + 1} / ${b.r1 + 2} / ${b.c1 + 2}`;
     wall.append(cell);
@@ -260,7 +269,29 @@ function render() {
       wall.append(splitter("y", r, `${r + 1} / ${a + 1} / ${r + 2} / ${z + 2}`));
   applySizes();
   renderTileList();
+  renderSoloBar();
   save();
+}
+
+// --- 1枚だけ画面いっぱいに表示（一時的なので保存しない） ---
+let solo = null;
+function setSolo(id) {
+  solo = tileEls[id] ? id : null;
+  wall.classList.toggle("solo", !!solo);
+  for (const [k, c] of Object.entries(tileEls)) c.classList.toggle("max", k === solo);
+  for (const b of $("solo").children) b.classList.toggle("on", b.textContent === solo);
+  $("back").disabled = !solo;
+}
+function renderSoloBar() {
+  $("solo").replaceChildren(...Object.keys(cur.boxes).map(id => {
+    const b = el("button");
+    b.type = "button";
+    b.textContent = id;
+    b.onmouseenter = () => { const t = st.tiles[id]; b.title = t?.type === "yt" ? "YouTube" : t?.src ?? ""; };
+    b.onclick = () => setSolo(solo === id ? null : id);
+    return b;
+  }));
+  setSolo(null);
 }
 
 function renderTileList() {
@@ -308,6 +339,7 @@ $("edit").onclick = () => {
   document.body.classList.toggle("editing", open);
   if (open) { $("layout").value = st.layout; $("err").textContent = ""; }
 };
+$("back").onclick = () => setSolo(null);
 $("reset").onclick = () => { st.rows.fill(1); st.cols.fill(1); applySizes(); save(); };
 
 render();
