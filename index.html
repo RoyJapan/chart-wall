@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chart Wall</title>
+<style>
+  :root { --bg:#0d0f14; --panel:#151922; --line:#232938; --text:#c9d1e0; --accent:#2962ff; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:13px/1.5 "Segoe UI","Yu Gothic UI",system-ui,sans-serif; }
+  body { display:flex; flex-direction:column; }
+  button, select, input, textarea { font:inherit; color:var(--text); background:var(--bg);
+                                    border:1px solid var(--line); border-radius:4px; padding:3px 8px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  header { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:6px 10px; border-bottom:1px solid var(--line); }
+  header .hint { margin-left:auto; opacity:.55; }
+
+  /* レイアウト編集パネル */
+  #panel { display:flex; flex-wrap:wrap; gap:28px; max-height:45vh; overflow:auto; padding:10px 12px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  #panel[hidden] { display:none; }
+  #panel h2 { margin:0 0 6px; font-size:13px; }
+  #layout { display:block; width:18em; min-height:8em; margin:6px 0; resize:vertical;
+            font:18px/1.35 Consolas,monospace; letter-spacing:.35em; }
+  #err { color:var(--err); }
+  .note { margin:6px 0 0; max-width:22em; opacity:.6; }
+  .tiles-wrap { flex:1; min-width:300px; }
+  #tiles { column-width:330px; column-gap:24px; }
+  .trow { display:grid; grid-template-columns:1.6em 7.5em 1fr; gap:6px; align-items:center; margin-bottom:5px; break-inside:avoid; }
+  .trow b { font:700 15px Consolas,monospace; text-align:center; }
+
+  /* タブの並び（CSS Grid） */
+  #wall { --gap:6px; flex:1; min-height:0; display:grid; gap:var(--gap); padding:4px; }
+  .tile { position:relative; min-width:0; min-height:0; overflow:hidden; background:var(--panel); border:1px solid var(--line); }
+  .tradingview-widget-container__widget { height:100%; }
+  .tile iframe { width:100%; height:100%; border:0; display:block; }
+  .off { display:grid; place-content:center; gap:14px; padding:16px; text-align:center; background:#000 center/cover no-repeat; }
+  .off p { margin:0; text-shadow:0 1px 3px #000; }
+  .off button { justify-self:center; font-size:15px; color:#fff; background:var(--accent); border:0; border-radius:6px; padding:10px 22px; }
+  .off button:hover { filter:brightness(1.15); }
+  body.editing .tile::after { content:attr(data-id); position:absolute; inset:0; display:grid; place-items:center;
+                              font:700 64px/1 Consolas,monospace; color:#fff; background:#000a; pointer-events:none; }
+
+  /* 境界線（タブの間のすき間に置くつまみ） */
+  .split { z-index:1; touch-action:none; border-radius:3px; }
+  .split.x { justify-self:start; width:var(--gap); margin-left:calc(-1 * var(--gap)); cursor:col-resize; }
+  .split.y { align-self:start; height:var(--gap); margin-top:calc(-1 * var(--gap)); cursor:row-resize; }
+  .split:hover, .split.on { background:var(--accent); }
+  body.dragging { user-select:none; }
+  body.dragging iframe { pointer-events:none; } /* ドラッグ中にiframeがマウスを奪うのを防ぐ */
+</style>
+</head>
+<body>
+<header>
+  <button id="edit" type="button">⚙ レイアウト編集</button>
+  <button id="reset" type="button">サイズを均等に戻す</button>
+  <span class="hint">境界線をドラッグでサイズ変更（ブラウザに保存されます）</span>
+</header>
+<section id="panel" hidden>
+  <div>
+    <h2>配置</h2>
+    <select id="preset"><option>プリセットから選ぶ…</option></select>
+    <textarea id="layout" spellcheck="false" autocomplete="off"></textarea>
+    <button id="apply" type="button">適用</button> <span id="err" role="alert"></span>
+    <p class="note">1文字＝1タブ。同じ文字を長方形に並べると、そのぶん大きいタブになります。「.」は空きマス。</p>
+  </div>
+  <div class="tiles-wrap">
+    <h2>各タブの中身</h2>
+    <div id="tiles"></div>
+  </div>
+</section>
+<main id="wall"></main>
+
+<script>
+// ===== 設定（画面の「レイアウト編集」からも変えられます） =====
+const YOUTUBE = ["https://www.youtube.com/watch?v=jfKfPfyJRdk"]; // YouTubeタブの初期URL
+const INTERVAL = "15"; // 足: "1","5","15","60","240","D","W"
+const SYMBOLS = [      // 新しく作ったチャートタブに、まだ使っていないものから順に割り当て
+  "FX:USDJPY", "FX:EURJPY", "FX:GBPJPY", "FX:AUDJPY",
+  "FX:EURUSD", "FX:GBPUSD", "OANDA:XAUUSD", "OANDA:JP225USD",
+  "FOREXCOM:SPXUSD", "FOREXCOM:NSXUSD", "BITSTAMP:BTCUSD", "TVC:US10Y",
+  "FX:AUDUSD", "FX:NZDJPY", "OANDA:XAGUSD", "BITSTAMP:ETHUSD",
+];
+const DEFAULT_LAYOUT = "AABC\nAADE\nFGHI";
+// ==============================================================
+
+const MIN = 80, KEY = "chart-wall-v2";
+const $ = id => document.getElementById(id);
+const el = (tag, cls) => Object.assign(document.createElement(tag), cls ? { className: cls } : {});
+const wall = $("wall");
+
+// --- 配置テキストの解析: "AAB\nAAC\nDEF" → 各文字の範囲。長方形でなければエラー ---
+function parseLayout(text) {
+  const grid = text.trim().split(/\r?\n/).map(l => [...l.replace(/\s/g, "")]).filter(r => r.length);
+  if (!grid.length) throw new Error("配置が空です");
+  if (grid.some(r => r.length !== grid[0].length)) throw new Error("各行の文字数をそろえてください");
+  const boxes = {};
+  grid.forEach((row, r) => row.forEach((ch, c) => {
+    if (ch === ".") return;
+    const b = boxes[ch] ??= { r0: r, r1: r, c0: c, c1: c };
+    b.r0 = Math.min(b.r0, r); b.r1 = Math.max(b.r1, r);
+    b.c0 = Math.min(b.c0, c); b.c1 = Math.max(b.c1, c);
+  }));
+  for (const [ch, b] of Object.entries(boxes))
+    for (let r = b.r0; r <= b.r1; r++)
+      for (let c = b.c0; c <= b.c1; c++)
+        if (grid[r][c] !== ch) throw new Error(`「${ch}」が長方形になっていません`);
+  return { grid, boxes };
+}
+// 境界になっている区間をまとめる: isBorder が true の連続区間 → [[開始, 終了], ...]
+function segments(len, isBorder) {
+  const out = [];
+  for (let i = 0; i < len; i++) if (isBorder(i)) {
+    const last = out[out.length - 1];
+    if (last && last[1] === i - 1) last[1] = i; else out.push([i, i]);
+  }
+  return out;
+}
+// プリセット（列を細かく割ると境界線の動かせる幅が狭くなるので、列は少なめにしている）
+const PRESETS = [
+  ["4枚", "AB\nCD"],
+  ["6枚", "ABC\nDEF"],
+  ["8枚", "ABCD\nEFGH"],
+  ["10枚", "ABCDE\nFGHIJ"],
+  ["12枚", "ABCD\nEFGH\nIJKL"],
+  ["14枚", "ABCD\nEFGH\nIJKL\nMMNN"],
+  ["16枚", "ABCD\nEFGH\nIJKL\nMNOP"],
+  ["大1＋5枚", "AAB\nAAC\nDEF"],
+  ["大1＋8枚", "AABC\nAADE\nFGHI"],
+];
+// ドラッグ後の手前側の大きさ(px)。両側とも MIN 以上を保つ
+const dragSplit = (pa, pb, d) => { const m = Math.min(MIN, (pa + pb) / 2); return Math.min(Math.max(pa + d, m), pa + pb - m); };
+
+// --- 保存された状態 ---
+let st = null;
+try { st = JSON.parse(localStorage.getItem(KEY)); } catch {}
+if (!st || typeof st !== "object") st = {};
+try { parseLayout(st.layout); } catch { st.layout = DEFAULT_LAYOUT; }
+if (!st.tiles || typeof st.tiles !== "object" || Array.isArray(st.tiles)) st.tiles = {};
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch {} };
+const okArr = (a, len) => Array.isArray(a) && a.length === len && a.every(w => Number.isFinite(w) && w > 0);
+
+let cur, tileEls = {};
+const freeSymbol = () => {
+  const used = new Set(Object.keys(cur.boxes).map(id => st.tiles[id]?.src));
+  return SYMBOLS.find(s => !used.has(s)) ?? SYMBOLS[0];
+};
+// タブ（文字）ごとの中身。初めて見る文字なら、最初の1枚はYouTube・以降はチャート
+function tileCfg(id) {
+  const t = st.tiles[id];
+  if (t && (t.type === "chart" || t.type === "yt") && typeof t.src === "string") return t;
+  const first = !Object.keys(st.tiles).length;
+  return st.tiles[id] = first && YOUTUBE[0] ? { type: "yt", src: YOUTUBE[0] } : { type: "chart", src: freeSymbol() };
+}
+
+// --- YouTube ---
+function parseYT(u) {
+  if (!u) return null;
+  const ch = /^UC[\w-]{22}$/.test(u) ? u : null;
+  const vid = ch ? null : (u.match(/(?:v=|youtu\.be\/|\/live\/|\/embed\/|\/shorts\/)([\w-]{11})/) || [])[1] || u;
+  return {
+    embed: ch ? `https://www.youtube.com/embed/live_stream?channel=${ch}&autoplay=1&mute=1`
+              : `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1&mute=1`,
+    watch: /^https?:\/\//.test(u) ? u
+         : ch ? `https://www.youtube.com/channel/${ch}/live` : `https://www.youtube.com/watch?v=${encodeURIComponent(vid)}`,
+    thumb: /^[\w-]{11}$/.test(vid) ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : "",
+  };
+}
+
+// --- タブの中身を入れる（セルが画面に入ってから呼ぶこと: TradingViewのscriptはその時に実行される） ---
+function fillTile(id) {
+  const cell = tileEls[id], t = tileCfg(id);
+  cell.replaceChildren();
+  cell.className = "tile";
+  cell.style.backgroundImage = "";
+  if (t.type === "chart") {
+    cell.classList.add("tradingview-widget-container");
+    cell.innerHTML = '<div class="tradingview-widget-container__widget"></div>';
+    const s = el("script");
+    s.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    s.async = true;
+    s.textContent = JSON.stringify({
+      autosize: true, symbol: t.src || SYMBOLS[0], interval: INTERVAL, timezone: "Asia/Tokyo", theme: "dark",
+      style: "1", locale: "ja", hide_side_toolbar: true, allow_symbol_change: true, save_image: false,
+    });
+    return cell.append(s);
+  }
+  const y = parseYT(t.src);
+  if (!y) { cell.classList.add("off"); cell.textContent = "「レイアウト編集」でYouTubeのURLを入力してください"; return; }
+  if (location.protocol !== "file:") { // http(s)で開いたときはそのまま埋め込める
+    const f = el("iframe");
+    Object.assign(f, { src: y.embed, title: "YouTube", allow: "autoplay; encrypted-media; picture-in-picture; fullscreen", allowFullscreen: true });
+    return cell.append(f);
+  }
+  // YouTubeはReferer無しの埋め込みを拒否する(エラー153)。file://はRefererを送れないので別ウィンドウで開く
+  cell.classList.add("off");
+  if (y.thumb) cell.style.backgroundImage = `linear-gradient(#000a,#000a),url(${y.thumb})`;
+  const p = el("p"), b = el("button");
+  p.textContent = "ローカルファイルでは埋め込めません（YouTubeエラー153）";
+  b.type = "button";
+  b.textContent = "▶ 別ウィンドウで開く";
+  b.onclick = () => window.open(y.watch, "yt-" + id, "popup,width=960,height=560");
+  cell.append(p, b);
+}
+
+// --- 大きさ: 列・行の比率(fr)だけを変える。DOMを作り直すとiframeが再読込されるため ---
+const fr = a => a.map(f => `minmax(0,${f}fr)`).join(" ");
+const applySizes = () => { wall.style.gridTemplateColumns = fr(st.cols); wall.style.gridTemplateRows = fr(st.rows); };
+
+function splitter(axis, line, area) {
+  const s = el("div", "split " + axis);
+  s.style.gridArea = area;
+  s.onpointerdown = e => {
+    const arr = axis === "x" ? st.cols : st.rows, i = line - 1, pos = axis === "x" ? "clientX" : "clientY";
+    const px = getComputedStyle(wall)[axis === "x" ? "gridTemplateColumns" : "gridTemplateRows"].split(" ").map(parseFloat);
+    const pa = px[i], pb = px[i + 1], total = arr[i] + arr[i + 1], start = e[pos];
+    s.setPointerCapture(e.pointerId);
+    s.classList.add("on");
+    document.body.classList.add("dragging");
+    document.body.style.cursor = getComputedStyle(s).cursor;
+    s.onpointermove = m => {
+      arr[i] = total * dragSplit(pa, pb, m[pos] - start) / (pa + pb);
+      arr[i + 1] = total - arr[i];
+      applySizes();
+    };
+    s.onpointerup = s.onpointercancel = () => {
+      s.onpointermove = null;
+      s.classList.remove("on");
+      document.body.classList.remove("dragging");
+      document.body.style.cursor = "";
+      save();
+    };
+  };
+  return s;
+}
+
+// --- 組み立て ---
+function render() {
+  cur = parseLayout(st.layout);
+  const { grid, boxes } = cur, h = grid.length, w = grid[0].length;
+  if (!okArr(st.rows, h) || !okArr(st.cols, w)) { st.rows = Array(h).fill(1); st.cols = Array(w).fill(1); }
+  wall.replaceChildren();
+  tileEls = {};
+  for (const [id, b] of Object.entries(boxes)) {
+    const cell = el("div");
+    cell.dataset.id = id;
+    cell.style.gridArea = `${b.r0 + 1} / ${b.c0 + 1} / ${b.r1 + 2} / ${b.c1 + 2}`;
+    wall.append(cell);
+    tileEls[id] = cell;
+    fillTile(id);
+  }
+  // 境界線は「隣が別のタブ」になっている所だけに置く
+  for (let c = 1; c < w; c++)
+    for (const [a, z] of segments(h, r => grid[r][c - 1] !== grid[r][c]))
+      wall.append(splitter("x", c, `${a + 1} / ${c + 1} / ${z + 2} / ${c + 2}`));
+  for (let r = 1; r < h; r++)
+    for (const [a, z] of segments(w, c => grid[r - 1][c] !== grid[r][c]))
+      wall.append(splitter("y", r, `${r + 1} / ${a + 1} / ${r + 2} / ${z + 2}`));
+  applySizes();
+  renderTileList();
+  save();
+}
+
+function renderTileList() {
+  const box = $("tiles");
+  box.replaceChildren();
+  for (const id of Object.keys(cur.boxes)) {
+    const t = tileCfg(id), row = el("div", "trow"), b = el("b"), sel = el("select"), inp = el("input");
+    b.textContent = id;
+    sel.add(new Option("チャート", "chart"));
+    sel.add(new Option("YouTube", "yt"));
+    sel.value = t.type;
+    inp.value = t.src;
+    const hint = () => inp.placeholder = t.type === "yt" ? "URL / 動画ID / チャンネルID(UC…)" : "銘柄 例: FX:USDJPY";
+    hint();
+    sel.onchange = () => {
+      t.type = sel.value;
+      t.src = t.type === "yt" ? (YOUTUBE[0] ?? "") : freeSymbol();
+      inp.value = t.src;
+      hint(); save(); fillTile(id);
+    };
+    inp.onchange = () => { t.src = inp.value.trim(); save(); fillTile(id); };
+    row.append(b, sel, inp);
+    box.append(row);
+  }
+}
+
+function apply() {
+  const text = $("layout").value.trim();
+  try { parseLayout(text); } catch (e) { $("err").textContent = e.message; return; }
+  $("err").textContent = "";
+  $("layout").value = st.layout = text;
+  render();
+}
+
+for (const [name] of PRESETS) $("preset").add(new Option(name));
+$("preset").onchange = e => {
+  const p = PRESETS[e.target.selectedIndex - 1];
+  e.target.selectedIndex = 0;
+  if (p) { $("layout").value = p[1]; apply(); }
+};
+$("apply").onclick = apply;
+$("edit").onclick = () => {
+  const open = $("panel").hidden;
+  $("panel").hidden = !open;
+  document.body.classList.toggle("editing", open);
+  if (open) { $("layout").value = st.layout; $("err").textContent = ""; }
+};
+$("reset").onclick = () => { st.rows.fill(1); st.cols.fill(1); applySizes(); save(); };
+
+render();
+</script>
+</body>
+</html>
