@@ -31,9 +31,17 @@
   #err { color:var(--err); }
   .note { margin:6px 0 0; max-width:22em; opacity:.6; }
   .tiles-wrap { flex:1; min-width:300px; }
-  #tiles { column-width:330px; column-gap:24px; }
-  .trow { display:grid; grid-template-columns:1.6em 7.5em 1fr; gap:6px; align-items:center; margin-bottom:5px; break-inside:avoid; }
+  .tiles-wrap .note { max-width:none; margin:0 0 8px; }
+  #tiles { column-width:560px; column-gap:24px; }
+  .trow { display:grid; grid-template-columns:1.6em 6.5em minmax(8em,1fr) 5.5em 7.5em; gap:6px; align-items:center;
+          margin-bottom:8px; break-inside:avoid; }
   .trow b { font:700 15px Consolas,monospace; text-align:center; }
+  .trow.yt input { grid-column:3 / -1; }
+  .trow details { grid-column:2 / -1; }
+  .trow summary { cursor:pointer; opacity:.8; }
+  .trow details div { display:flex; flex-wrap:wrap; gap:4px 14px; padding:4px 0 2px; }
+  .trow label { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+  .trow input[type=checkbox] { margin:0; padding:0; accent-color:var(--accent); }
 
   /* タブの並び（CSS Grid） */
   #wall { --gap:6px; flex:1; min-height:0; display:grid; gap:var(--gap); padding:4px; }
@@ -77,6 +85,7 @@
   </div>
   <div class="tiles-wrap">
     <h2>各タブの中身</h2>
+    <p class="note">チャートの中で変えた銘柄・足・インジケーター・描画は保存されません。ここで設定したものが保存されます。</p>
     <div id="tiles"></div>
   </div>
 </section>
@@ -85,7 +94,7 @@
 <script>
 // ===== 設定（画面の「レイアウト編集」からも変えられます） =====
 const YOUTUBE = ["https://www.youtube.com/watch?v=jfKfPfyJRdk"]; // YouTubeタブの初期URL
-const INTERVAL = "15"; // 足: "1","5","15","60","240","D","W"
+const INTERVAL = "15"; // 新しく作ったチャートの足: "1","5","15","60","240","D","W"
 const SYMBOLS = [      // 新しく作ったチャートタブに、まだ使っていないものから順に割り当て
   "FX:USDJPY", "FX:EURJPY", "FX:GBPJPY", "FX:AUDJPY",
   "FX:EURUSD", "FX:GBPUSD", "OANDA:XAUUSD", "OANDA:JP225USD",
@@ -96,6 +105,13 @@ const DEFAULT_LAYOUT = "AABC\nAADE\nFGHI";
 // ==============================================================
 
 const MIN = 80, KEY = "chart-wall-v2";
+// チャートごとに選べる項目（[TradingViewに渡す値, 表示名]）
+const INTERVALS = [["1", "1分"], ["3", "3分"], ["5", "5分"], ["15", "15分"], ["30", "30分"], ["60", "1時間"],
+                   ["120", "2時間"], ["180", "3時間"], ["240", "4時間"], ["D", "日足"], ["W", "週足"]];
+const STYLES = [["1", "ローソク足"], ["9", "中空ローソク"], ["8", "平均足"], ["0", "バー"], ["2", "ライン"], ["3", "エリア"]];
+const STUDIES = [["STD;SMA", "単純移動平均"], ["STD;EMA", "指数移動平均"], ["STD;Bollinger_Bands", "ボリンジャーバンド"],
+                 ["STD;Ichimoku%1Cloud", "一目均衡表"], ["STD;VWAP", "VWAP"], ["STD;RSI", "RSI"], ["STD;MACD", "MACD"],
+                 ["STD;Stochastic", "ストキャスティクス"], ["STD;Average_True_Range", "ATR"]];
 const $ = id => document.getElementById(id);
 const el = (tag, cls) => Object.assign(document.createElement(tag), cls ? { className: cls } : {});
 const wall = $("wall");
@@ -164,6 +180,15 @@ function tileCfg(id) {
   return st.tiles[id] = first && YOUTUBE[0] ? { type: "yt", src: YOUTUBE[0] } : { type: "chart", src: freeSymbol() };
 }
 
+// 保存値をそのまま信用せず、選べる値だけに絞る（古い保存データは既定値になる）
+const has = (list, v) => list.some(([k]) => k === v);
+const chartOpts = t => ({
+  interval: has(INTERVALS, t.interval) ? t.interval : INTERVAL,
+  style: has(STYLES, t.style) ? t.style : "1",
+  studies: Array.isArray(t.studies) ? t.studies.filter(id => has(STUDIES, id)) : [],
+  volume: t.volume !== false,
+});
+
 // --- YouTube ---
 function parseYT(u) {
   if (!u) return null;
@@ -190,9 +215,11 @@ function fillTile(id) {
     const s = el("script");
     s.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
     s.async = true;
+    const o = chartOpts(t);
     s.textContent = JSON.stringify({
-      autosize: true, symbol: t.src || SYMBOLS[0], interval: INTERVAL, timezone: "Asia/Tokyo", theme: "dark",
-      style: "1", locale: "ja", hide_side_toolbar: true, allow_symbol_change: true, save_image: false,
+      autosize: true, symbol: t.src || SYMBOLS[0], interval: o.interval, timezone: "Asia/Tokyo", theme: "dark",
+      style: o.style, locale: "ja", hide_side_toolbar: true, allow_symbol_change: true, save_image: false,
+      studies: o.studies, hide_volume: !o.volume,
     });
     return cell.append(s);
   }
@@ -295,27 +322,60 @@ function renderSoloBar() {
 }
 
 function renderTileList() {
-  const box = $("tiles");
-  box.replaceChildren();
-  for (const id of Object.keys(cur.boxes)) {
-    const t = tileCfg(id), row = el("div", "trow"), b = el("b"), sel = el("select"), inp = el("input");
-    b.textContent = id;
-    sel.add(new Option("チャート", "chart"));
-    sel.add(new Option("YouTube", "yt"));
-    sel.value = t.type;
-    inp.value = t.src;
-    const hint = () => inp.placeholder = t.type === "yt" ? "URL / 動画ID / チャンネルID(UC…)" : "銘柄 例: FX:USDJPY";
-    hint();
-    sel.onchange = () => {
-      t.type = sel.value;
-      t.src = t.type === "yt" ? (YOUTUBE[0] ?? "") : freeSymbol();
-      inp.value = t.src;
-      hint(); save(); fillTile(id);
-    };
-    inp.onchange = () => { t.src = inp.value.trim(); save(); fillTile(id); };
-    row.append(b, sel, inp);
-    box.append(row);
+  $("tiles").replaceChildren(...Object.keys(cur.boxes).map(tileRow));
+}
+
+function tileRow(id) {
+  const t = tileCfg(id), row = el("div", "trow"), b = el("b"), type = el("select"), inp = el("input");
+  const changed = () => { save(); fillTile(id); };
+  b.textContent = id;
+  type.add(new Option("チャート", "chart"));
+  type.add(new Option("YouTube", "yt"));
+  type.value = t.type;
+  type.onchange = () => {
+    t.type = type.value;
+    t.src = t.type === "yt" ? (YOUTUBE[0] ?? "") : freeSymbol();
+    changed();
+    row.replaceWith(tileRow(id));
+  };
+  inp.value = t.src;
+  inp.onchange = () => { t.src = inp.value.trim(); changed(); };
+  row.append(b, type, inp);
+  if (t.type === "yt") {
+    row.classList.add("yt");
+    inp.placeholder = "URL / 動画ID / チャンネルID(UC…)";
+    return row;
   }
+  inp.placeholder = "銘柄 例: FX:USDJPY";
+  const o = chartOpts(t);
+  const pick = (list, key) => {
+    const sel = el("select");
+    for (const [v, label] of list) sel.add(new Option(label, v));
+    sel.value = o[key];
+    sel.onchange = () => { t[key] = sel.value; changed(); };
+    return sel;
+  };
+  const check = (label, on, set) => {
+    const l = el("label"), c = el("input");
+    c.type = "checkbox";
+    c.checked = on;
+    c.onchange = () => { set(c.checked); changed(); };
+    l.append(c, label);
+    return l;
+  };
+  const det = el("details"), sum = el("summary"), box = el("div");
+  const count = () => sum.textContent = `インジケーター（${chartOpts(t).studies.length}）`;
+  box.append(
+    check("出来高", o.volume, v => t.volume = v),
+    ...STUDIES.map(([sid, label]) => check(label, o.studies.includes(sid), v => {
+      t.studies = chartOpts(t).studies.filter(x => x !== sid).concat(v ? [sid] : []);
+      count();
+    })),
+  );
+  count();
+  det.append(sum, box);
+  row.append(pick(INTERVALS, "interval"), pick(STYLES, "style"), det);
+  return row;
 }
 
 function apply() {
