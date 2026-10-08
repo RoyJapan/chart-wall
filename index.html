@@ -47,6 +47,7 @@
   #wall { --gap:6px; flex:1; min-height:0; display:grid; grid-template: minmax(0,1fr) / minmax(0,1fr); padding:4px; }
   #canvas { position:relative; grid-area:1 / 1; min-width:0; min-height:0; }
   .tile { position:absolute; min-width:0; min-height:0; overflow:hidden; background:var(--panel); border:1px solid var(--line); }
+  .tile > .tradingview-widget-container { width:100%; height:100%; }
   .tradingview-widget-container__widget { height:100%; }
   .tile iframe { width:100%; height:100%; border:0; display:block; }
   .off { display:grid; place-content:center; gap:14px; padding:16px; text-align:center; background:#000 center/cover no-repeat; }
@@ -217,8 +218,8 @@ function fillTile(id) {
   cell.classList.remove("tradingview-widget-container", "off");
   cell.style.backgroundImage = "";
   if (t.type === "chart") {
-    cell.classList.add("tradingview-widget-container");
-    cell.innerHTML = '<div class="tradingview-widget-container__widget"></div>';
+    const host = el("div", "tradingview-widget-container");
+    host.innerHTML = '<div class="tradingview-widget-container__widget"></div>';
     const s = el("script");
     s.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
     s.async = true;
@@ -228,7 +229,8 @@ function fillTile(id) {
       style: o.style, locale: "ja", hide_side_toolbar: true, allow_symbol_change: true, save_image: false,
       studies: o.studies, hide_volume: !o.volume,
     });
-    return cell.append(s);
+    host.append(s);
+    return cell.append(host);
   }
   const y = parseYT(t.src);
   if (!y) { cell.classList.add("off"); cell.textContent = "「レイアウト編集」でYouTubeのURLを入力してください"; return; }
