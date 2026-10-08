@@ -70,6 +70,7 @@
 <body>
 <header>
   <button id="edit" type="button">⚙ レイアウト編集</button>
+  <button id="equal-side" type="button">右側4枚を均等に</button>
   <button id="reset" type="button">サイズを均等に戻す</button>
   <span class="hint">境界線をドラッグでサイズ変更（ブラウザに保存されます）</span>
   <nav id="solo" aria-label="1枚だけ大きく表示"></nav>
@@ -102,6 +103,14 @@ const SYMBOLS = [      // 新しく作ったチャートタブに、まだ使っ
   "FX:AUDUSD", "FX:NZDJPY", "OANDA:XAGUSD", "BITSTAMP:ETHUSD",
 ];
 const DEFAULT_LAYOUT = "AABC\nAADE\nFGHI";
+const DEFAULT_TILES = {
+  A: { type: "yt", src: YOUTUBE[0] },
+  B: { type: "chart", src: "PEPPERSTONE:USDX", style: "2", volume: false },
+  C: { type: "chart", src: "PEPPERSTONE:JPYX", style: "2", volume: false },
+  D: { type: "chart", src: "PEPPERSTONE:EURX", style: "2", volume: false },
+};
+const LEGACY_DEFAULTS = { B: "FX:USDJPY", C: "FX:EURJPY", D: "FX:GBPJPY" };
+const SIDE_TILES = ["B", "C", "D", "E"];
 // ==============================================================
 
 const MIN = 80, KEY = "chart-wall-v2";
@@ -164,6 +173,11 @@ try { st = JSON.parse(localStorage.getItem(KEY)); } catch {}
 if (!st || typeof st !== "object") st = {};
 try { parseLayout(st.layout); } catch { st.layout = DEFAULT_LAYOUT; }
 if (!st.tiles || typeof st.tiles !== "object" || Array.isArray(st.tiles)) st.tiles = {};
+if (st.layout === DEFAULT_LAYOUT) for (const [id, symbol] of Object.entries(LEGACY_DEFAULTS)) {
+  const t = st.tiles[id];
+  if (t?.type === "chart" && t.src === symbol && !["interval", "style", "studies", "volume"].some(k => Object.prototype.hasOwnProperty.call(t, k)))
+    st.tiles[id] = { ...DEFAULT_TILES[id] };
+}
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch {} };
 const okArr = (a, len) => Array.isArray(a) && a.length === len && a.every(w => Number.isFinite(w) && w > 0);
 
@@ -176,6 +190,7 @@ const freeSymbol = () => {
 function tileCfg(id) {
   const t = st.tiles[id];
   if (t && (t.type === "chart" || t.type === "yt") && typeof t.src === "string") return t;
+  if (DEFAULT_TILES[id]) return st.tiles[id] = { ...DEFAULT_TILES[id] };
   const first = !Object.keys(st.tiles).length;
   return st.tiles[id] = first && YOUTUBE[0] ? { type: "yt", src: YOUTUBE[0] } : { type: "chart", src: freeSymbol() };
 }
@@ -195,8 +210,8 @@ function parseYT(u) {
   const ch = /^UC[\w-]{22}$/.test(u) ? u : null;
   const vid = ch ? null : (u.match(/(?:v=|youtu\.be\/|\/live\/|\/embed\/|\/shorts\/)([\w-]{11})/) || [])[1] || u;
   return {
-    embed: ch ? `https://www.youtube.com/embed/live_stream?channel=${ch}&autoplay=1&mute=1`
-              : `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1&mute=1`,
+    embed: ch ? `https://www.youtube.com/embed/live_stream?channel=${ch}&autoplay=1&mute=1&enablejsapi=1`
+              : `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1&mute=1&enablejsapi=1`,
     watch: /^https?:\/\//.test(u) ? u
          : ch ? `https://www.youtube.com/channel/${ch}/live` : `https://www.youtube.com/watch?v=${encodeURIComponent(vid)}`,
     thumb: /^[\w-]{11}$/.test(vid) ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : "",
@@ -226,7 +241,7 @@ function fillTile(id) {
   const y = parseYT(t.src);
   if (!y) { cell.classList.add("off"); cell.textContent = "「レイアウト編集」でYouTubeのURLを入力してください"; return; }
   if (location.protocol !== "file:") { // http(s)で開いたときはそのまま埋め込める
-    const f = el("iframe");
+    const f = el("iframe", "yt");
     Object.assign(f, { src: y.embed, title: "YouTube", allow: "autoplay; encrypted-media; picture-in-picture; fullscreen", allowFullscreen: true });
     return cell.append(f);
   }
@@ -244,6 +259,22 @@ function fillTile(id) {
 // --- 大きさ: 列・行の比率(fr)だけを変える。DOMを作り直すとiframeが再読込されるため ---
 const fr = a => a.map(f => `minmax(0,${f}fr)`).join(" ");
 const applySizes = () => { wall.style.gridTemplateColumns = fr(st.cols); wall.style.gridTemplateRows = fr(st.rows); };
+function sideTileTracks() {
+  const boxes = SIDE_TILES.map(id => cur.boxes[id]);
+  if (boxes.some(b => !b || b.r0 !== b.r1 || b.c0 !== b.c1)) return null;
+  const rows = [...new Set(boxes.map(b => b.r0))], cols = [...new Set(boxes.map(b => b.c0))];
+  if (rows.length !== 2 || cols.length !== 2 || new Set(boxes.map(b => `${b.r0}:${b.c0}`)).size !== 4) return null;
+  return { rows, cols };
+}
+function equalizeSideTiles() {
+  const tracks = sideTileTracks();
+  if (!tracks) return false;
+  for (const [sizes, pair] of [[st.rows, tracks.rows], [st.cols, tracks.cols]]) {
+    const equal = (sizes[pair[0]] + sizes[pair[1]]) / 2;
+    sizes[pair[0]] = sizes[pair[1]] = equal;
+  }
+  return true;
+}
 
 function splitter(axis, line, area) {
   const s = el("div", "split " + axis);
@@ -277,6 +308,8 @@ function render() {
   cur = parseLayout(st.layout);
   const { grid, boxes } = cur, h = grid.length, w = grid[0].length;
   if (!okArr(st.rows, h) || !okArr(st.cols, w)) { st.rows = Array(h).fill(1); st.cols = Array(w).fill(1); }
+  if (!st.sideTilesEqualized && equalizeSideTiles()) st.sideTilesEqualized = true;
+  $("equal-side").disabled = !sideTileTracks();
   wall.replaceChildren();
   tileEls = {};
   for (const [id, b] of Object.entries(boxes)) {
@@ -308,7 +341,23 @@ function setSolo(id) {
   for (const [k, c] of Object.entries(tileEls)) c.classList.toggle("max", k === solo);
   for (const b of $("solo").children) b.classList.toggle("on", b.textContent === solo);
   $("back").disabled = !solo;
+  syncVideos();
 }
+
+// --- 見えていないYouTubeは一時停止（隠れていてもデコード・再生が続いて重くなるため） ---
+// 自分で止めた動画だけ再開する（ユーザーが手で止めた動画は勝手に動かさない）
+const pausedByUs = new WeakSet();
+const ytCmd = (f, func) => f.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args: [] }), "*");
+function syncVideos() {
+  for (const [id, cell] of Object.entries(tileEls)) {
+    const f = cell.querySelector("iframe.yt");
+    if (!f) continue;
+    const show = !document.hidden && (!solo || solo === id);
+    if (!show && !pausedByUs.has(f)) { pausedByUs.add(f); ytCmd(f, "pauseVideo"); }
+    else if (show && pausedByUs.delete(f)) ytCmd(f, "playVideo");
+  }
+}
+document.addEventListener("visibilitychange", syncVideos); // 最小化・別タブ・他ウィンドウで完全に隠れたとき
 function renderSoloBar() {
   $("solo").replaceChildren(...Object.keys(cur.boxes).map(id => {
     const b = el("button");
@@ -393,6 +442,7 @@ $("preset").onchange = e => {
   if (p) { $("layout").value = p[1]; apply(); }
 };
 $("apply").onclick = apply;
+$("equal-side").onclick = () => { if (equalizeSideTiles()) { applySizes(); save(); } };
 $("edit").onclick = () => {
   const open = $("panel").hidden;
   $("panel").hidden = !open;
