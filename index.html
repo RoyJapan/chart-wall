@@ -43,9 +43,10 @@
   .trow label { display:flex; align-items:center; gap:4px; white-space:nowrap; }
   .trow input[type=checkbox] { margin:0; padding:0; accent-color:var(--accent); }
 
-  /* タブの並び（CSS Grid） */
-  #wall { --gap:6px; flex:1; min-height:0; display:grid; gap:var(--gap); padding:4px; }
-  .tile { position:relative; min-width:0; min-height:0; overflow:hidden; background:var(--panel); border:1px solid var(--line); }
+  /* タイルは個別の境界位置で配置 */
+  #wall { --gap:6px; flex:1; min-height:0; padding:4px; }
+  #canvas { position:relative; width:100%; height:100%; }
+  .tile { position:absolute; min-width:0; min-height:0; overflow:hidden; background:var(--panel); border:1px solid var(--line); }
   .tradingview-widget-container__widget { height:100%; }
   .tile iframe { width:100%; height:100%; border:0; display:block; }
   .off { display:grid; place-content:center; gap:14px; padding:16px; text-align:center; background:#000 center/cover no-repeat; }
@@ -54,14 +55,14 @@
   .off button:hover { filter:brightness(1.15); }
   /* 1枚だけ大きく表示: 他は隠すだけ（DOMを動かすとiframeが再読込されるため） */
   #wall.solo .tile:not(.max), #wall.solo .split { visibility:hidden; }
-  #wall .tile.max { grid-area:1 / 1 / -1 / -1 !important; z-index:2; }
+  #wall .tile.max { left:0 !important; right:0 !important; top:0 !important; bottom:0 !important; margin:0; z-index:2; }
   body.editing .tile::after { content:attr(data-id); position:absolute; inset:0; display:grid; place-items:center;
                               font:700 64px/1 Consolas,monospace; color:#fff; background:#000a; pointer-events:none; }
 
   /* 境界線（タブの間のすき間に置くつまみ） */
-  .split { z-index:1; touch-action:none; border-radius:3px; }
-  .split.x { justify-self:start; width:var(--gap); margin-left:calc(-1 * var(--gap)); cursor:col-resize; }
-  .split.y { align-self:start; height:var(--gap); margin-top:calc(-1 * var(--gap)); cursor:row-resize; }
+  .split { position:absolute; z-index:1; touch-action:none; border-radius:3px; }
+  .split.x { width:var(--gap); transform:translateX(-50%); cursor:col-resize; }
+  .split.y { height:var(--gap); transform:translateY(-50%); cursor:row-resize; }
   .split:hover, .split.on { background:var(--accent); }
   body.dragging { user-select:none; }
   body.dragging iframe { pointer-events:none; } /* ドラッグ中にiframeがマウスを奪うのを防ぐ */
@@ -70,9 +71,8 @@
 <body>
 <header>
   <button id="edit" type="button">⚙ レイアウト編集</button>
-  <button id="equal-side" type="button">右側4枚を均等に</button>
   <button id="reset" type="button">サイズを均等に戻す</button>
-  <span class="hint">境界線をドラッグでサイズ変更（ブラウザに保存されます）</span>
+  <span class="hint">境界ドラッグ＝隣接タイルだけ調整 / Shift+ドラッグ＝行・列全体（保存されます）</span>
   <nav id="solo" aria-label="1枚だけ大きく表示"></nav>
   <button id="back" type="button" disabled>⊞ 全体に戻る</button>
 </header>
@@ -90,7 +90,7 @@
     <div id="tiles"></div>
   </div>
 </section>
-<main id="wall"></main>
+<main id="wall"><div id="canvas"></div></main>
 
 <script>
 // ===== 設定（画面の「レイアウト編集」からも変えられます） =====
@@ -110,7 +110,6 @@ const DEFAULT_TILES = {
   D: { type: "chart", src: "PEPPERSTONE:EURX", style: "2", volume: false },
 };
 const LEGACY_DEFAULTS = { B: "FX:USDJPY", C: "FX:EURJPY", D: "FX:GBPJPY" };
-const SIDE_TILES = ["B", "C", "D", "E"];
 // ==============================================================
 
 const MIN = 80, KEY = "chart-wall-v2";
@@ -124,6 +123,7 @@ const STUDIES = [["STD;SMA", "単純移動平均"], ["STD;EMA", "指数移動平
 const $ = id => document.getElementById(id);
 const el = (tag, cls) => Object.assign(document.createElement(tag), cls ? { className: cls } : {});
 const wall = $("wall");
+const canvas = $("canvas");
 
 // --- 配置テキストの解析: "AAB\nAAC\nDEF" → 各文字の範囲。長方形でなければエラー ---
 function parseLayout(text) {
@@ -142,15 +142,6 @@ function parseLayout(text) {
       for (let c = b.c0; c <= b.c1; c++)
         if (grid[r][c] !== ch) throw new Error(`「${ch}」が長方形になっていません`);
   return { grid, boxes };
-}
-// 境界になっている区間をまとめる: isBorder が true の連続区間 → [[開始, 終了], ...]
-function segments(len, isBorder) {
-  const out = [];
-  for (let i = 0; i < len; i++) if (isBorder(i)) {
-    const last = out[out.length - 1];
-    if (last && last[1] === i - 1) last[1] = i; else out.push([i, i]);
-  }
-  return out;
 }
 // プリセット（列を細かく割ると境界線の動かせる幅が狭くなるので、列は少なめにしている）
 const PRESETS = [
@@ -173,6 +164,7 @@ try { st = JSON.parse(localStorage.getItem(KEY)); } catch {}
 if (!st || typeof st !== "object") st = {};
 try { parseLayout(st.layout); } catch { st.layout = DEFAULT_LAYOUT; }
 if (!st.tiles || typeof st.tiles !== "object" || Array.isArray(st.tiles)) st.tiles = {};
+delete st.sideTilesEqualized;
 if (st.layout === DEFAULT_LAYOUT) for (const [id, symbol] of Object.entries(LEGACY_DEFAULTS)) {
   const t = st.tiles[id];
   if (t?.type === "chart" && t.src === symbol && !["interval", "style", "studies", "volume"].some(k => Object.prototype.hasOwnProperty.call(t, k)))
@@ -181,7 +173,7 @@ if (st.layout === DEFAULT_LAYOUT) for (const [id, symbol] of Object.entries(LEGA
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch {} };
 const okArr = (a, len) => Array.isArray(a) && a.length === len && a.every(w => Number.isFinite(w) && w > 0);
 
-let cur, tileEls = {};
+let cur, tileEls = {}, splitEls = [];
 const freeSymbol = () => {
   const used = new Set(Object.keys(cur.boxes).map(id => st.tiles[id]?.src));
   return SYMBOLS.find(s => !used.has(s)) ?? SYMBOLS[0];
@@ -256,42 +248,92 @@ function fillTile(id) {
   cell.append(p, b);
 }
 
-// --- 大きさ: 列・行の比率(fr)だけを変える。DOMを作り直すとiframeが再読込されるため ---
-const fr = a => a.map(f => `minmax(0,${f}fr)`).join(" ");
-const applySizes = () => { wall.style.gridTemplateColumns = fr(st.cols); wall.style.gridTemplateRows = fr(st.rows); };
-function sideTileTracks() {
-  const boxes = SIDE_TILES.map(id => cur.boxes[id]);
-  if (boxes.some(b => !b || b.r0 !== b.r1 || b.c0 !== b.c1)) return null;
-  const rows = [...new Set(boxes.map(b => b.r0))], cols = [...new Set(boxes.map(b => b.c0))];
-  if (rows.length !== 2 || cols.length !== 2 || new Set(boxes.map(b => `${b.r0}:${b.c0}`)).size !== 4) return null;
-  return { rows, cols };
+// --- サイズ: 通常ドラッグはタイル単位、Shift+ドラッグは従来の行・列単位 ---
+function rectsFromTracks() {
+  const x = [0], y = [0], cw = st.cols.reduce((a, b) => a + b, 0), rh = st.rows.reduce((a, b) => a + b, 0);
+  for (const size of st.cols) x.push(x[x.length - 1] + size / cw);
+  for (const size of st.rows) y.push(y[y.length - 1] + size / rh);
+  return Object.fromEntries(Object.entries(cur.boxes).map(([id, b]) => [id, {
+    x0: x[b.c0], x1: x[b.c1 + 1], y0: y[b.r0], y1: y[b.r1 + 1],
+  }]));
 }
-function equalizeSideTiles() {
-  const tracks = sideTileTracks();
-  if (!tracks) return false;
-  for (const [sizes, pair] of [[st.rows, tracks.rows], [st.cols, tracks.cols]]) {
-    const equal = (sizes[pair[0]] + sizes[pair[1]]) / 2;
-    sizes[pair[0]] = sizes[pair[1]] = equal;
+function validRects() {
+  return st.rectLayout === st.layout && st.rects && Object.keys(cur.boxes).every(id => {
+    const r = st.rects[id];
+    return r && [r.x0, r.x1, r.y0, r.y1].every(Number.isFinite) &&
+      r.x0 >= 0 && r.y0 >= 0 && r.x1 <= 1 && r.y1 <= 1 && r.x1 > r.x0 && r.y1 > r.y0;
+  });
+}
+function ensureRects() {
+  if (!validRects()) { st.rects = rectsFromTracks(); st.rectLayout = st.layout; }
+}
+const pct = n => `${n * 100}%`;
+function applyRects() {
+  for (const [id, r] of Object.entries(st.rects)) {
+    const cell = tileEls[id];
+    if (cell) Object.assign(cell.style, {
+      left: `calc(${pct(r.x0)} + ${r.x0 > 1e-6 ? 3 : 0}px)`, right: `calc(${pct(1 - r.x1)} + ${r.x1 < 1 - 1e-6 ? 3 : 0}px)`,
+      top: `calc(${pct(r.y0)} + ${r.y0 > 1e-6 ? 3 : 0}px)`, bottom: `calc(${pct(1 - r.y1)} + ${r.y1 < 1 - 1e-6 ? 3 : 0}px)`,
+    });
   }
-  return true;
+  for (const { element, id, axis } of splitEls) {
+    const r = st.rects[id];
+    if (axis === "x") Object.assign(element.style, { left: pct(r.x1), top: pct(r.y0), bottom: pct(1 - r.y1) });
+    else Object.assign(element.style, { top: pct(r.y1), left: pct(r.x0), right: pct(1 - r.x1) });
+  }
 }
-
-function splitter(axis, line, area) {
+function applySizes() {
+  st.rects = rectsFromTracks();
+  st.rectLayout = st.layout;
+  applyRects();
+}
+function edgeNeighbors(id, axis) {
+  const b = cur.boxes[id], found = new Set();
+  if (axis === "x" && b.c1 + 1 < cur.grid[0].length)
+    for (let r = b.r0; r <= b.r1; r++) if (cur.grid[r][b.c1 + 1] !== ".") found.add(cur.grid[r][b.c1 + 1]);
+  if (axis === "y" && b.r1 + 1 < cur.grid.length)
+    for (let c = b.c0; c <= b.c1; c++) if (cur.grid[b.r1 + 1][c] !== ".") found.add(cur.grid[b.r1 + 1][c]);
+  found.delete(id);
+  return [...found];
+}
+function splitter(id, axis, neighbors, line) {
   const s = el("div", "split " + axis);
-  s.style.gridArea = area;
+  splitEls.push({ element: s, id, axis });
   s.onpointerdown = e => {
-    const arr = axis === "x" ? st.cols : st.rows, i = line - 1, pos = axis === "x" ? "clientX" : "clientY";
-    const px = getComputedStyle(wall)[axis === "x" ? "gridTemplateColumns" : "gridTemplateRows"].split(" ").map(parseFloat);
-    const pa = px[i], pb = px[i + 1], total = arr[i] + arr[i + 1], start = e[pos];
+    const pos = axis === "x" ? "clientX" : "clientY", dimension = axis === "x" ? canvas.clientWidth : canvas.clientHeight;
+    if (!dimension || !neighbors.length) return;
+    if (e.shiftKey) {
+      const arr = axis === "x" ? st.cols : st.rows, i = line - 1;
+      if (i < 0 || i >= arr.length - 1) return;
+      const usable = dimension, sum = arr.reduce((a, b) => a + b, 0);
+      if (usable <= 0) return;
+      const pa = usable * arr[i] / sum, pb = usable * arr[i + 1] / sum, total = arr[i] + arr[i + 1];
+      const edge = axis === "x" ? st.rects[id].x1 : st.rects[id].y1;
+      const globalEdge = usable * arr.slice(0, line).reduce((a, b) => a + b, 0) / sum;
+      const start = e[pos] - (edge * usable - globalEdge);
+      s.onpointermove = m => {
+        arr[i] = total * dragSplit(pa, pb, m[pos] - start) / (pa + pb);
+        arr[i + 1] = total - arr[i];
+        applySizes();
+      };
+    } else {
+      const r = st.rects[id], low = axis === "x" ? "x0" : "y0", high = axis === "x" ? "x1" : "y1";
+      const minPx = Math.min(MIN, ...neighbors.map(n => (st.rects[n][high] - r[low]) * dimension / 2));
+      const min = r[low] + minPx / dimension;
+      const max = Math.min(...neighbors.map(n => st.rects[n][high] - minPx / dimension)), start = e[pos], edge = r[high];
+      if (max < min) return;
+      s.onpointermove = m => {
+        const next = Math.min(max, Math.max(min, edge + (m[pos] - start) / dimension));
+        r[high] = next;
+        for (const n of neighbors) st.rects[n][low] = next;
+        applyRects();
+      };
+    }
+    e.preventDefault();
     s.setPointerCapture(e.pointerId);
     s.classList.add("on");
     document.body.classList.add("dragging");
     document.body.style.cursor = getComputedStyle(s).cursor;
-    s.onpointermove = m => {
-      arr[i] = total * dragSplit(pa, pb, m[pos] - start) / (pa + pb);
-      arr[i + 1] = total - arr[i];
-      applySizes();
-    };
     s.onpointerup = s.onpointercancel = () => {
       s.onpointermove = null;
       s.classList.remove("on");
@@ -300,7 +342,7 @@ function splitter(axis, line, area) {
       save();
     };
   };
-  return s;
+  canvas.append(s);
 }
 
 // --- 組み立て ---
@@ -308,26 +350,23 @@ function render() {
   cur = parseLayout(st.layout);
   const { grid, boxes } = cur, h = grid.length, w = grid[0].length;
   if (!okArr(st.rows, h) || !okArr(st.cols, w)) { st.rows = Array(h).fill(1); st.cols = Array(w).fill(1); }
-  if (!st.sideTilesEqualized && equalizeSideTiles()) st.sideTilesEqualized = true;
-  $("equal-side").disabled = !sideTileTracks();
-  wall.replaceChildren();
+  ensureRects();
+  canvas.replaceChildren();
   tileEls = {};
+  splitEls = [];
   for (const [id, b] of Object.entries(boxes)) {
     const cell = el("div", "tile");
     cell.dataset.id = id;
-    cell.style.gridArea = `${b.r0 + 1} / ${b.c0 + 1} / ${b.r1 + 2} / ${b.c1 + 2}`;
-    wall.append(cell);
+    canvas.append(cell);
     tileEls[id] = cell;
     fillTile(id);
   }
-  // 境界線は「隣が別のタブ」になっている所だけに置く
-  for (let c = 1; c < w; c++)
-    for (const [a, z] of segments(h, r => grid[r][c - 1] !== grid[r][c]))
-      wall.append(splitter("x", c, `${a + 1} / ${c + 1} / ${z + 2} / ${c + 2}`));
-  for (let r = 1; r < h; r++)
-    for (const [a, z] of segments(w, c => grid[r - 1][c] !== grid[r][c]))
-      wall.append(splitter("y", r, `${r + 1} / ${a + 1} / ${r + 2} / ${z + 2}`));
-  applySizes();
+  for (const [id, b] of Object.entries(boxes)) {
+    const right = edgeNeighbors(id, "x"), below = edgeNeighbors(id, "y");
+    if (right.length) splitter(id, "x", right, b.c1 + 1);
+    if (below.length) splitter(id, "y", below, b.r1 + 1);
+  }
+  applyRects();
   renderTileList();
   renderSoloBar();
   save();
@@ -431,6 +470,7 @@ function apply() {
   const text = $("layout").value.trim();
   try { parseLayout(text); } catch (e) { $("err").textContent = e.message; return; }
   $("err").textContent = "";
+  if (text !== st.layout) { st.rects = null; st.rectLayout = null; }
   $("layout").value = st.layout = text;
   render();
 }
@@ -442,7 +482,6 @@ $("preset").onchange = e => {
   if (p) { $("layout").value = p[1]; apply(); }
 };
 $("apply").onclick = apply;
-$("equal-side").onclick = () => { if (equalizeSideTiles()) { applySizes(); save(); } };
 $("edit").onclick = () => {
   const open = $("panel").hidden;
   $("panel").hidden = !open;
