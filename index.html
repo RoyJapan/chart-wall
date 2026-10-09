@@ -382,23 +382,7 @@ function setSolo(id) {
   for (const [k, c] of Object.entries(tileEls)) c.classList.toggle("max", k === solo);
   for (const b of $("solo").children) b.classList.toggle("on", b.textContent === solo);
   $("back").disabled = !solo;
-  syncVideos();
 }
-
-// --- 見えていないYouTubeは一時停止（隠れていてもデコード・再生が続いて重くなるため） ---
-// 自分で止めた動画だけ再開する（ユーザーが手で止めた動画は勝手に動かさない）
-const pausedByUs = new WeakSet();
-const ytCmd = (f, func) => f.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args: [] }), "*");
-function syncVideos() {
-  for (const [id, cell] of Object.entries(tileEls)) {
-    const f = cell.querySelector("iframe.yt");
-    if (!f) continue;
-    const show = !document.hidden && (!solo || solo === id);
-    if (!show && !pausedByUs.has(f)) { pausedByUs.add(f); ytCmd(f, "pauseVideo"); }
-    else if (show && pausedByUs.delete(f)) ytCmd(f, "playVideo");
-  }
-}
-document.addEventListener("visibilitychange", syncVideos); // 最小化・別タブ・他ウィンドウで完全に隠れたとき
 function renderSoloBar() {
   $("solo").replaceChildren(...Object.keys(cur.boxes).map(id => {
     const b = el("button");
