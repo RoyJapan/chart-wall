@@ -36,7 +36,11 @@
   .trow { display:grid; grid-template-columns:1.6em 6.5em minmax(8em,1fr) 5.5em 7.5em; gap:6px; align-items:center;
           margin-bottom:8px; break-inside:avoid; }
   .trow b { font:700 15px Consolas,monospace; text-align:center; }
-  .trow.yt input { grid-column:3 / -1; }
+  .trow.media input { grid-column:3 / -1; }
+  .trow .media-note, .trow > label { grid-column:2 / -1; }
+  .media-note { margin:0; opacity:.65; }
+  .add-tabs { display:grid; gap:6px; margin-top:14px; }
+  .add-tabs label { display:flex; align-items:center; gap:6px; }
   .trow details { grid-column:2 / -1; }
   .trow summary { cursor:pointer; opacity:.8; }
   .trow details div { display:flex; flex-wrap:wrap; gap:4px 14px; padding:4px 0 2px; }
@@ -84,6 +88,11 @@
     <textarea id="layout" spellcheck="false" autocomplete="off"></textarea>
     <button id="apply" type="button">適用</button> <span id="err" role="alert"></span>
     <p class="note">1文字＝1タブ。同じ文字を長方形に並べると、そのぶん大きいタブになります。「.」は空きマス。</p>
+    <div class="add-tabs">
+      <h2>縦長タブを任意追加</h2>
+      <label>高さ <select id="add-anchor" aria-label="追加タブの高さ"></select></label>
+      <button id="add-chat" type="button">YouTubeコメント欄を追加</button>
+    </div>
   </div>
   <div class="tiles-wrap">
     <h2>各タブの中身</h2>
@@ -114,6 +123,7 @@ const LEGACY_DEFAULTS = { B: "FX:USDJPY", C: "FX:EURJPY", D: "FX:GBPJPY" };
 // ==============================================================
 
 const MIN = 80, KEY = "chart-wall-v2";
+const TILE_TYPES = [["chart", "チャート"], ["yt", "YouTube"], ["chat", "YouTubeコメント"]];
 // チャートごとに選べる項目（[TradingViewに渡す値, 表示名]）
 const INTERVALS = [["1", "1分"], ["3", "3分"], ["5", "5分"], ["15", "15分"], ["30", "30分"], ["60", "1時間"],
                    ["120", "2時間"], ["180", "3時間"], ["240", "4時間"], ["D", "日足"], ["W", "週足"]];
@@ -182,7 +192,7 @@ const freeSymbol = () => {
 // タブ（文字）ごとの中身。初めて見る文字なら、最初の1枚はYouTube・以降はチャート
 function tileCfg(id) {
   const t = st.tiles[id];
-  if (t && (t.type === "chart" || t.type === "yt") && typeof t.src === "string") return t;
+  if (t && TILE_TYPES.some(([type]) => type === t.type) && typeof t.src === "string") return t;
   if (DEFAULT_TILES[id]) return st.tiles[id] = { ...DEFAULT_TILES[id] };
   const first = !Object.keys(st.tiles).length;
   return st.tiles[id] = first && YOUTUBE[0] ? { type: "yt", src: YOUTUBE[0] } : { type: "chart", src: freeSymbol() };
@@ -199,21 +209,142 @@ const chartOpts = t => ({
 
 // --- YouTube ---
 function parseYT(u) {
-  if (!u) return null;
-  const ch = /^UC[\w-]{22}$/.test(u) ? u : null;
-  const vid = ch ? null : (u.match(/(?:v=|youtu\.be\/|\/live\/|\/embed\/|\/shorts\/)([\w-]{11})/) || [])[1] || u;
+  if (typeof u !== "string" || !u.trim()) return null;
+  u = u.trim();
+  let ch = /^UC[\w-]{22}$/.test(u) ? u : null, vid = /^[\w-]{11}$/.test(u) ? u : null;
+  if (!ch && !vid) {
+    let url;
+    try { url = new URL(/^https?:\/\//i.test(u) ? u : "https://" + u); } catch { return null; }
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.port) return null;
+    const host = url.hostname.toLowerCase().replace(/^(www\.|m\.|music\.)/, ""), path = url.pathname.split("/").filter(Boolean);
+    if (host === "youtu.be") vid = path[0];
+    else if (host === "youtube.com") {
+      if (path[0] === "channel") ch = path[1];
+      else vid = url.searchParams.get("v") || (["live", "embed", "shorts"].includes(path[0]) ? path[1] : null);
+    } else return null;
+  }
+  if (ch ? !/^UC[\w-]{22}$/.test(ch) : !/^[\w-]{11}$/.test(vid ?? "")) return null;
   return {
+    vid: ch ? null : vid, channel: ch,
     embed: ch ? `https://www.youtube.com/embed/live_stream?channel=${ch}&autoplay=1&mute=1&enablejsapi=1`
               : `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1&mute=1&enablejsapi=1`,
-    watch: /^https?:\/\//.test(u) ? u
-         : ch ? `https://www.youtube.com/channel/${ch}/live` : `https://www.youtube.com/watch?v=${encodeURIComponent(vid)}`,
-    thumb: /^[\w-]{11}$/.test(vid) ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : "",
+    watch: ch ? `https://www.youtube.com/channel/${ch}/live` : `https://www.youtube.com/watch?v=${vid}`,
+    thumb: vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : "",
   };
+}
+function liveCorrection(previous, sample, now, enabled) {
+  const same = previous?.videoId === sample.videoId, old = same ? previous : null;
+  const live = sample.isLive === true;
+  const valid = Number.isFinite(sample.liveEdge) && Number.isFinite(sample.time) && sample.liveEdge > 0 && sample.time >= 0;
+  const reload = valid && enabled && live && sample.atLiveHead !== true && [1, 3].includes(sample.state) && sample.liveEdge - sample.time > 15 && now - (old?.lastSync ?? 0) >= 30000;
+  return { ...sample, at: now, live, lastSync: reload ? now : old?.lastSync ?? 0, reload };
+}
+function planSideTile(layout, rects, cols, id, anchor) {
+  const { grid, boxes } = parseLayout(layout), b = boxes[anchor], height = rects[anchor] ?? { y0: 0, y1: 1 }, share = 0.18;
+  if ([...id].length !== 1 || id === "." || boxes[id]) throw new Error("追加タブの名前が重複しています");
+  const next = grid.map((row, r) => row.join("") + (!b || r >= b.r0 && r <= b.r1 ? id : ".")).join("\n");
+  const nextRects = Object.fromEntries(Object.keys(boxes).map(key => [key, { ...rects[key], x0: rects[key].x0 * (1 - share), x1: rects[key].x1 * (1 - share) }]));
+  nextRects[id] = { x0: 1 - share, x1: 1, y0: height.y0, y1: height.y1 };
+  return { layout: next, rects: nextRects, cols: [...cols, cols.reduce((a, v) => a + v, 0) * share / (1 - share)] };
+}
+function resizeBoundary(rects, id, axis, dimension, minSize = 80) {
+  const low = axis === "x" ? "x0" : "y0", high = axis === "x" ? "x1" : "y1";
+  const near = axis === "x" ? "y0" : "x0", far = axis === "x" ? "y1" : "x1", edge = rects[id][high], eps = 1e-6;
+  const overlap = (a, b) => Math.min(a[far], b[far]) - Math.max(a[near], b[near]) > eps;
+  const before = new Set([id]), after = new Set();
+  let changed;
+  do {
+    const count = before.size + after.size;
+    for (const [key, r] of Object.entries(rects)) {
+      if (Math.abs(r[low] - edge) < eps && [...before].some(k => overlap(r, rects[k]))) after.add(key);
+      if (Math.abs(r[high] - edge) < eps && [...after].some(k => overlap(r, rects[k]))) before.add(key);
+    }
+    changed = count !== before.size + after.size;
+  } while (changed);
+  const left = Math.max(...[...before].map(k => rects[k][low]));
+  const right = after.size ? Math.min(...[...after].map(k => rects[k][high])) : Math.min(1,
+    ...Object.entries(rects).filter(([key, r]) => key !== id && r[low] >= edge - eps && overlap(r, rects[id])).map(([, r]) => r[low]));
+  const minimum = Math.min(minSize / dimension, (right - left) / 2);
+  return { before: [...before], after: [...after], min: left + minimum, max: right - (after.size ? minimum : 0) };
+}
+
+const ytPlayers = new Map(), ytVideoIds = new Map();
+let ytApiLoading;
+function loadYouTubeAPI() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (ytApiLoading) return ytApiLoading;
+  ytApiLoading = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("YouTube接続がタイムアウトしました")), 15000);
+    window.onYouTubeIframeAPIReady = () => { clearTimeout(timer); resolve(window.YT); };
+    const script = el("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    script.onerror = () => { clearTimeout(timer); reject(new Error("YouTube接続に失敗しました")); };
+    document.head.append(script);
+  }).catch(error => { ytApiLoading = null; throw error; });
+  return ytApiLoading;
+}
+function chatVideoId(t) {
+  const source = st.tiles[t.src];
+  return source?.type === "yt" ? ytVideoIds.get(t.src) || parseYT(source.src)?.vid : parseYT(t.src)?.vid;
+}
+function refreshChats(sourceId) {
+  for (const id of Object.keys(cur.boxes)) {
+    const t = st.tiles[id];
+    if (t?.type === "chat" && t.src === sourceId && tileEls[id]?.querySelector("iframe")?.dataset.videoId !== chatVideoId(t)) fillTile(id);
+  }
+}
+function syncLivePlayer(id) {
+  const entry = ytPlayers.get(id), t = st.tiles[id];
+  if (!entry?.ready || t?.type !== "yt") return;
+  const player = entry.player, videoId = parseYT(player.getVideoUrl())?.vid;
+  if (!videoId) return;
+  if (videoId && ytVideoIds.get(id) !== videoId) { ytVideoIds.set(id, videoId); refreshChats(id); }
+  // shortcut: YouTube内部のライブ情報を利用、情報形式が変わったらこの取得部分を更新する
+  const progress = player.playerInfo?.progressState;
+  entry.sample = liveCorrection(entry.sample, {
+    videoId, time: player.getCurrentTime(), state: player.getPlayerState(),
+    liveEdge: progress?.seekableEnd, atLiveHead: progress?.isAtLiveHead,
+    isLive: player.getVideoData?.()?.isLive,
+  }, Date.now(), t.liveSync !== false);
+  if (entry.sample.reload) player.loadVideoById(videoId);
+}
+function watchYouTube(id, cell, frame) {
+  loadYouTubeAPI().then(YT => {
+    if (!frame.isConnected || tileEls[id] !== cell) return;
+    const entry = { ready: false, player: null, sample: null };
+    ytPlayers.set(id, entry);
+    entry.player = new YT.Player(frame, { events: {
+      onReady: event => { entry.player = event.target; entry.ready = true; syncLivePlayer(id); },
+      onStateChange: event => { if (event.data === 1) syncLivePlayer(id); },
+    } });
+  }).catch(error => {
+    if (frame.isConnected) {
+      const note = Array.from($("tiles").querySelectorAll("[data-live-note]")).find(n => n.dataset.liveNote === id);
+      if (note) note.textContent = "自動補正に接続できません。プレイヤーの「ライブ」で手動補正してください。";
+      console.warn(error);
+    }
+  });
+}
+function tileNotice(cell, message, buttonText, action) {
+  cell.classList.add("off");
+  const p = el("p");
+  p.textContent = message;
+  cell.append(p);
+  if (action) {
+    const button = el("button");
+    button.type = "button";
+    button.textContent = buttonText;
+    button.onclick = action;
+    cell.append(button);
+  }
 }
 
 // --- タブの中身を入れる（セルが画面に入ってから呼ぶこと: TradingViewのscriptはその時に実行される） ---
 function fillTile(id) {
   const cell = tileEls[id], t = tileCfg(id);
+  ytPlayers.get(id)?.player?.destroy();
+  ytPlayers.delete(id);
+  ytVideoIds.delete(id);
   cell.replaceChildren();
   cell.classList.remove("tradingview-widget-container", "off");
   cell.style.backgroundImage = "";
@@ -232,22 +363,33 @@ function fillTile(id) {
     host.append(s);
     return cell.append(host);
   }
+  if (t.type === "chat") {
+    const vid = chatVideoId(t);
+    if (!vid) return tileNotice(cell, "YouTubeタブ名（例：A）または配信の動画URLを指定してください。チャンネル指定の場合は配信の読み込みを待ってください。");
+    if (location.protocol === "file:") return tileNotice(cell, "コメント欄は公開ページまたはstart.batで起動したページで表示できます。");
+    const url = new URL("https://www.youtube.com/live_chat");
+    url.search = new URLSearchParams({ v: vid, embed_domain: location.hostname, dark_theme: "1" }).toString();
+    const frame = el("iframe");
+    frame.src = url.href;
+    frame.title = "YouTubeライブチャット";
+    frame.dataset.videoId = vid;
+    return cell.append(frame);
+  }
   const y = parseYT(t.src);
-  if (!y) { cell.classList.add("off"); cell.textContent = "「レイアウト編集」でYouTubeのURLを入力してください"; return; }
+  if (!y) return tileNotice(cell, "「レイアウト編集」で有効なYouTubeの動画URL・動画ID・チャンネルIDを入力してください。");
   if (location.protocol !== "file:") { // http(s)で開いたときはそのまま埋め込める
     const f = el("iframe", "yt");
-    Object.assign(f, { src: y.embed, title: "YouTube", allow: "autoplay; encrypted-media; picture-in-picture; fullscreen", allowFullscreen: true });
-    return cell.append(f);
+    const src = new URL(y.embed);
+    src.searchParams.set("origin", location.origin);
+    Object.assign(f, { src: src.href, title: "YouTube", allow: "autoplay; encrypted-media; picture-in-picture; fullscreen", allowFullscreen: true });
+    cell.append(f);
+    watchYouTube(id, cell, f);
+    return;
   }
   // YouTubeはReferer無しの埋め込みを拒否する(エラー153)。file://はRefererを送れないので別ウィンドウで開く
-  cell.classList.add("off");
   if (y.thumb) cell.style.backgroundImage = `linear-gradient(#000a,#000a),url(${y.thumb})`;
-  const p = el("p"), b = el("button");
-  p.textContent = "ローカルファイルでは埋め込めません（YouTubeエラー153）";
-  b.type = "button";
-  b.textContent = "▶ 別ウィンドウで開く";
-  b.onclick = () => window.open(y.watch, "yt-" + id, "popup,width=960,height=560");
-  cell.append(p, b);
+  tileNotice(cell, "ローカルファイルでは埋め込めません（YouTubeエラー153）", "▶ 別ウィンドウで開く",
+    () => window.open(y.watch, "yt-" + id, "popup,width=960,height=560,noopener"));
 }
 
 // --- サイズ: 通常ドラッグはタイル単位、Shift+ドラッグは従来の行・列単位 ---
@@ -255,6 +397,7 @@ function rectsFromTracks() {
   const x = [0], y = [0], cw = st.cols.reduce((a, b) => a + b, 0), rh = st.rows.reduce((a, b) => a + b, 0);
   for (const size of st.cols) x.push(x[x.length - 1] + size / cw);
   for (const size of st.rows) y.push(y[y.length - 1] + size / rh);
+  x[x.length - 1] = y[y.length - 1] = 1;
   return Object.fromEntries(Object.entries(cur.boxes).map(([id, b]) => [id, {
     x0: x[b.c0], x1: x[b.c1 + 1], y0: y[b.r0], y1: y[b.r1 + 1],
   }]));
@@ -289,21 +432,12 @@ function applySizes() {
   st.rectLayout = st.layout;
   applyRects();
 }
-function edgeNeighbors(id, axis) {
-  const b = cur.boxes[id], found = new Set();
-  if (axis === "x" && b.c1 + 1 < cur.grid[0].length)
-    for (let r = b.r0; r <= b.r1; r++) if (cur.grid[r][b.c1 + 1] !== ".") found.add(cur.grid[r][b.c1 + 1]);
-  if (axis === "y" && b.r1 + 1 < cur.grid.length)
-    for (let c = b.c0; c <= b.c1; c++) if (cur.grid[b.r1 + 1][c] !== ".") found.add(cur.grid[b.r1 + 1][c]);
-  found.delete(id);
-  return [...found];
-}
-function splitter(id, axis, neighbors, line) {
+function splitter(id, axis, line) {
   const s = el("div", "split " + axis);
   splitEls.push({ element: s, id, axis });
   s.onpointerdown = e => {
     const pos = axis === "x" ? "clientX" : "clientY", dimension = axis === "x" ? canvas.clientWidth : canvas.clientHeight;
-    if (!dimension || !neighbors.length) return;
+    if (!dimension) return;
     if (e.shiftKey) {
       const arr = axis === "x" ? st.cols : st.rows, i = line - 1;
       if (i < 0 || i >= arr.length - 1) return;
@@ -320,14 +454,12 @@ function splitter(id, axis, neighbors, line) {
       };
     } else {
       const r = st.rects[id], low = axis === "x" ? "x0" : "y0", high = axis === "x" ? "x1" : "y1";
-      const minPx = Math.min(MIN, ...neighbors.map(n => (st.rects[n][high] - r[low]) * dimension / 2));
-      const min = r[low] + minPx / dimension;
-      const max = Math.min(...neighbors.map(n => st.rects[n][high] - minPx / dimension)), start = e[pos], edge = r[high];
-      if (max < min) return;
+      const boundary = resizeBoundary(st.rects, id, axis, dimension, MIN), start = e[pos], edge = r[high];
+      if (boundary.max < boundary.min) return;
       s.onpointermove = m => {
-        const next = Math.min(max, Math.max(min, edge + (m[pos] - start) / dimension));
-        r[high] = next;
-        for (const n of neighbors) st.rects[n][low] = next;
+        const next = Math.min(boundary.max, Math.max(boundary.min, edge + (m[pos] - start) / dimension));
+        for (const n of boundary.before) st.rects[n][high] = next;
+        for (const n of boundary.after) st.rects[n][low] = next;
         applyRects();
       };
     }
@@ -353,6 +485,9 @@ function render() {
   const { grid, boxes } = cur, h = grid.length, w = grid[0].length;
   if (!okArr(st.rows, h) || !okArr(st.cols, w)) { st.rows = Array(h).fill(1); st.cols = Array(w).fill(1); }
   ensureRects();
+  for (const entry of ytPlayers.values()) entry.player?.destroy();
+  ytPlayers.clear();
+  ytVideoIds.clear();
   canvas.replaceChildren();
   tileEls = {};
   splitEls = [];
@@ -364,9 +499,9 @@ function render() {
     fillTile(id);
   }
   for (const [id, b] of Object.entries(boxes)) {
-    const right = edgeNeighbors(id, "x"), below = edgeNeighbors(id, "y");
-    if (right.length) splitter(id, "x", right, b.c1 + 1);
-    if (below.length) splitter(id, "y", below, b.r1 + 1);
+    const r = st.rects[id];
+    if (r.x1 < 1 - 1e-6) splitter(id, "x", b.c1 + 1);
+    if (r.y1 < 1 - 1e-6 || st.tiles[id]?.added) splitter(id, "y", b.r1 + 1);
   }
   applyRects();
   renderTileList();
@@ -388,7 +523,7 @@ function renderSoloBar() {
     const b = el("button");
     b.type = "button";
     b.textContent = id;
-    b.onmouseenter = () => { const t = st.tiles[id]; b.title = t?.type === "yt" ? "YouTube" : t?.src ?? ""; };
+    b.onmouseenter = () => { const t = st.tiles[id]; b.title = `${TILE_TYPES.find(([type]) => type === t?.type)?.[1] ?? ""}: ${t?.src ?? ""}`; };
     b.onclick = () => setSolo(solo === id ? null : id);
     return b;
   }));
@@ -397,27 +532,69 @@ function renderSoloBar() {
 
 function renderTileList() {
   $("tiles").replaceChildren(...Object.keys(cur.boxes).map(tileRow));
+  renderAddAnchors();
+}
+function renderAddAnchors() {
+  const select = $("add-anchor"), old = select.value, hadOptions = select.options.length > 0;
+  const ids = Object.keys(cur.boxes).filter(id => st.tiles[id]?.type === "yt");
+  select.replaceChildren(...ids.map(id => new Option(`YouTube ${id}と同じ高さ`, id)), new Option("画面全体", ""));
+  select.value = hadOptions && Array.from(select.options).some(o => o.value === old) ? old : ids[0] ?? "";
+}
+function addChatTile() {
+  if ($("layout").value.trim() && $("layout").value.trim() !== st.layout) {
+    $("err").textContent = "編集中の配置を先に「適用」してください。";
+    return;
+  }
+  const id = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"].find(key => !cur.boxes[key] && !st.tiles[key]);
+  if (!id) { $("err").textContent = "追加できるタブ名がありません。"; return; }
+  const anchor = $("add-anchor").value, source = Object.keys(cur.boxes).find(key => st.tiles[key]?.type === "yt");
+  const plan = planSideTile(st.layout, st.rects, st.cols, id, anchor);
+  st.tiles[id] = { type: "chat", src: anchor || source || "", added: true };
+  st.layout = st.rectLayout = plan.layout;
+  st.rects = plan.rects;
+  st.cols = plan.cols;
+  $("layout").value = st.layout;
+  $("err").textContent = "";
+  render();
 }
 
 function tileRow(id) {
   const t = tileCfg(id), row = el("div", "trow"), b = el("b"), type = el("select"), inp = el("input");
-  const changed = () => { save(); fillTile(id); };
+  const changed = () => { save(); fillTile(id); refreshChats(id); };
   b.textContent = id;
-  type.add(new Option("チャート", "chart"));
-  type.add(new Option("YouTube", "yt"));
+  for (const [value, label] of TILE_TYPES) type.add(new Option(label, value));
+  type.setAttribute("aria-label", `${id}の種類`);
+  inp.setAttribute("aria-label", `${id}のURL・銘柄・参照タブ`);
   type.value = t.type;
   type.onchange = () => {
     t.type = type.value;
-    t.src = t.type === "yt" ? (YOUTUBE[0] ?? "") : freeSymbol();
+    t.src = t.type === "yt" ? (YOUTUBE[0] ?? "") : t.type === "chat" ?
+      Object.keys(cur.boxes).find(key => st.tiles[key]?.type === "yt") ?? "" : freeSymbol();
     changed();
     row.replaceWith(tileRow(id));
+    renderAddAnchors();
   };
   inp.value = t.src;
   inp.onchange = () => { t.src = inp.value.trim(); changed(); };
   row.append(b, type, inp);
-  if (t.type === "yt") {
-    row.classList.add("yt");
-    inp.placeholder = "URL / 動画ID / チャンネルID(UC…)";
+  if (t.type !== "chart") {
+    row.classList.add("media");
+    const note = el("p", "media-note");
+    if (t.type === "yt") {
+      inp.placeholder = "URL / 動画ID / チャンネルID(UC…)";
+      const label = el("label"), check = el("input");
+      check.type = "checkbox";
+      check.checked = t.liveSync !== false;
+      check.onchange = () => { t.liveSync = check.checked; save(); syncLivePlayer(id); };
+      label.append(check, "ライブの遅延を自動補正");
+      row.append(label);
+      note.dataset.liveNote = id;
+      note.textContent = "再生中のライブが15秒以上遅れたら最新位置へ読み直します。過去を見るときはチェックを外してください。手動停止は維持します。";
+    } else {
+      inp.placeholder = "YouTubeタブ名（Aなど） / 配信の動画URL";
+      note.textContent = "YouTubeタブ名を指定すると、そのタブの配信変更に連動します。ライブチャットが有効な配信で表示できます。";
+    }
+    row.append(note);
     return row;
   }
   inp.placeholder = "銘柄 例: FX:USDJPY";
@@ -468,6 +645,7 @@ $("preset").onchange = e => {
   if (p) { $("layout").value = p[1]; apply(); }
 };
 $("apply").onclick = apply;
+$("add-chat").onclick = addChatTile;
 $("edit").onclick = () => {
   const open = $("panel").hidden;
   $("panel").hidden = !open;
@@ -478,6 +656,8 @@ $("back").onclick = () => setSolo(null);
 $("reset").onclick = () => { st.rows.fill(1); st.cols.fill(1); applySizes(); save(); };
 
 render();
+setInterval(() => { for (const id of ytPlayers.keys()) syncLivePlayer(id); }, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) for (const id of ytPlayers.keys()) syncLivePlayer(id); });
 </script>
 </body>
 </html>
